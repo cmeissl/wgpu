@@ -446,7 +446,9 @@ impl<'a, W: Write> Writer<'a, W> {
         writeln!(self.out)?;
 
         // Write external texture helpers when requested
-        if self.features.contains(Features::EXTERNAL_TEXTURE) {
+        if self.entry_point.stage == ShaderStage::Fragment
+            && self.features.contains(Features::EXTERNAL_TEXTURE)
+        {
             self.write_external_texture_helpers()?;
             writeln!(self.out)?;
         }
