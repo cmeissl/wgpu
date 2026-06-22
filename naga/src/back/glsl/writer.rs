@@ -333,6 +333,16 @@ impl<'a, W: Write> Writer<'a, W> {
                     arrayed,
                     class,
                 } => {
+                    // External textures are lowered to three plane samplers
+                    // plus a params SSBO; they are emitted by a dedicated
+                    // helper and must not fall through to the generic image
+                    // path (which would try to print `write_image_type` for
+                    // `ImageClass::External`).
+                    if class == crate::ImageClass::External {
+                        self.write_global_external_texture(handle, global)?;
+                        continue;
+                    }
+
                     // Gather the storage format if needed
                     let storage_format_access = match self.module.types[global.ty].inner {
                         TypeInner::Image {
@@ -393,41 +403,6 @@ impl<'a, W: Write> Writer<'a, W> {
 
                     self.reflection_names_globals
                         .insert(handle, global_name.clone());
-
-                    // For external textures, also emit a UBO for the params
-                    if class == crate::ImageClass::External {
-                        if let Some(ref br) = global.binding {
-                            if let Some(ext_target) = self
-                                .options
-                                .binding_map
-                                .get(br)
-                                .and_then(|t| t.external_texture.as_ref())
-                            {
-                                let params_ty =
-                                    self.module.special_types.external_texture_params.unwrap();
-                                let params_ty_name = &self.names[&NameKey::Type(params_ty)].clone();
-                                let block_name = format!(
-                                    "{}_block_{}{:?}",
-                                    params_ty_name.trim_end_matches('_'),
-                                    self.block_id.generate(),
-                                    self.entry_point.stage,
-                                );
-                                if self.options.version.supports_explicit_locations() {
-                                    write!(
-                                        self.out,
-                                        "layout(std430, binding = {}) ",
-                                        ext_target.params
-                                    )?;
-                                } else {
-                                    write!(self.out, "layout(std430) ")?;
-                                }
-                                write!(self.out, "readonly buffer {block_name} {{ ")?;
-                                write!(self.out, "{params_ty_name} _member; ")?;
-                                writeln!(self.out, "}} {global_name}_params;")?;
-                                writeln!(self.out)?;
-                            }
-                        }
-                    }
                 }
                 // glsl has no concept of samplers so we just ignore it
                 TypeInner::Sampler { .. } => continue,
@@ -639,10 +614,7 @@ impl<'a, W: Write> Writer<'a, W> {
             Ic::Depth { multi: true } => ("sampler", float, "MS", ""),
             Ic::Depth { multi: false } => ("sampler", float, "", "Shadow"),
             Ic::Storage { format, .. } => ("image", format.into(), "", ""),
-            Ic::External => {
-                write!(self.out, "highp samplerExternalOES")?;
-                return Ok(());
-            }
+            Ic::External => unreachable!("external textures are lowered to plane samplers"),
         };
 
         let precision = if self.options.version.is_es() {
@@ -1314,6 +1286,44 @@ impl<'a, W: Write> Writer<'a, W> {
             })
             .collect();
         self.write_slice(&arguments, |this, _, &(i, arg)| {
+            // External textures are lowered to three plane `sampler2D`
+            // arguments plus the params struct; handle them up front and
+            // skip the generic argument-writing path.
+            if let TypeInner::Image {
+                class: crate::ImageClass::External,
+                ..
+            } = this.module.types[arg.ty].inner
+            {
+                let precision = if this.options.version.is_es() {
+                    "highp "
+                } else {
+                    ""
+                };
+                let func = match ctx.ty {
+                    back::FunctionType::Function(handle) => handle,
+                    back::FunctionType::EntryPoint(_) => {
+                        unreachable!("external textures cannot be entry point arguments")
+                    }
+                };
+                for plane in 0..3 {
+                    let name = &this.names[&NameKey::ExternalTextureFunctionArgument(
+                        func,
+                        i as u32,
+                        proc::ExternalTextureNameKey::Plane(plane),
+                    )];
+                    write!(this.out, "{precision}sampler2D {name}, ")?;
+                }
+                let params_ty = this.module.special_types.external_texture_params.unwrap();
+                let params_ty_name = this.names[&NameKey::Type(params_ty)].clone();
+                let params_name = &this.names[&NameKey::ExternalTextureFunctionArgument(
+                    func,
+                    i as u32,
+                    proc::ExternalTextureNameKey::Params,
+                )];
+                write!(this.out, "{params_ty_name} {params_name}")?;
+                return Ok(());
+            }
+
             // Write the argument type
             match this.module.types[arg.ty].inner {
                 // We treat images separately because they might require
@@ -1364,18 +1374,6 @@ impl<'a, W: Write> Writer<'a, W> {
                     }
                 }
                 _ => {}
-            }
-
-            // For external texture arguments, emit an additional params parameter
-            if let TypeInner::Image {
-                class: crate::ImageClass::External,
-                ..
-            } = this.module.types[arg.ty].inner
-            {
-                let params_ty = this.module.special_types.external_texture_params.unwrap();
-                let params_ty_name = this.names[&NameKey::Type(params_ty)].clone();
-                let arg_name = this.names[&ctx.argument_key(i as u32)].clone();
-                write!(this.out, ", {params_ty_name} {arg_name}_params")?;
             }
 
             Ok(())
@@ -1550,79 +1548,213 @@ impl<'a, W: Write> Writer<'a, W> {
         Ok(())
     }
 
+    /// Emits the lowered form of an external texture global: three plane
+    /// `sampler2D` uniforms plus the `NagaExternalTextureParams` SSBO.
+    ///
+    /// The plane and params names come from the [`Namer`](crate::proc::Namer)'s
+    /// dedicated external-texture name keys so they stay consistent with the
+    /// call sites and the other backends.
+    fn write_global_external_texture(
+        &mut self,
+        handle: Handle<crate::GlobalVariable>,
+        global: &crate::GlobalVariable,
+    ) -> BackendResult {
+        let br = global.binding.as_ref().unwrap();
+        let ext_target = self
+            .options
+            .binding_map
+            .get(br)
+            .and_then(|t| t.external_texture.as_ref())
+            .copied();
+
+        let precision = if self.options.version.is_es() {
+            "highp "
+        } else {
+            ""
+        };
+
+        // Emit one `sampler2D` per plane.
+        for i in 0..3 {
+            let plane_binding = if self.options.version.supports_explicit_locations() {
+                ext_target.map(|t| t.planes[i])
+            } else {
+                None
+            };
+            if let Some(binding) = plane_binding {
+                write!(self.out, "layout(binding = {binding}) ")?;
+            }
+            let plane_name = &self.names[&NameKey::ExternalTextureGlobalVariable(
+                handle,
+                proc::ExternalTextureNameKey::Plane(i),
+            )];
+            writeln!(self.out, "uniform {precision}sampler2D {plane_name};")?;
+        }
+
+        // Record the first plane as the reflection name for this global.
+        let plane0_name = self.names[&NameKey::ExternalTextureGlobalVariable(
+            handle,
+            proc::ExternalTextureNameKey::Plane(0),
+        )]
+            .clone();
+        self.reflection_names_globals.insert(handle, plane0_name);
+
+        // Emit the params SSBO.
+        let params_ty = self.module.special_types.external_texture_params.unwrap();
+        let params_ty_name = self.names[&NameKey::Type(params_ty)].clone();
+        let params_name = self.names[&NameKey::ExternalTextureGlobalVariable(
+            handle,
+            proc::ExternalTextureNameKey::Params,
+        )]
+            .clone();
+        let block_name = format!(
+            "{}_block_{}{:?}",
+            params_ty_name.trim_end_matches('_'),
+            self.block_id.generate(),
+            self.entry_point.stage,
+        );
+        if let (true, Some(ext_target)) =
+            (self.options.version.supports_explicit_locations(), ext_target)
+        {
+            write!(self.out, "layout(std430, binding = {}) ", ext_target.params)?;
+        } else {
+            write!(self.out, "layout(std430) ")?;
+        }
+        write!(self.out, "readonly buffer {block_name} {{ ")?;
+        write!(self.out, "{params_ty_name} _member; ")?;
+        writeln!(self.out, "}} {params_name};")?;
+        writeln!(self.out)?;
+
+        Ok(())
+    }
+
     #[rustfmt::skip]
     fn write_external_texture_helpers(&mut self) -> BackendResult {
         let params_ty = self.module.special_types.external_texture_params.unwrap();
         let params_ty_name = self.names[&NameKey::Type(params_ty)].clone();
 
-        // External sampler
-        writeln!(self.out, "vec4 {SAMPLE_EXTERNAL_TEXTURE_FUNCTION}(highp samplerExternalOES tex, {params_ty_name} params, vec2 coords) {{")?;
+        let precision = if self.options.version.is_es() { "highp " } else { "" };
+
+        // External sampler (textureSampleBaseClampToEdge). Mirrors the
+        // MSL/HLSL helpers: branch on `params.num_planes` at runtime.
+        writeln!(self.out, "vec4 {SAMPLE_EXTERNAL_TEXTURE_FUNCTION}({precision}sampler2D plane0, {precision}sampler2D plane1, {precision}sampler2D plane2, {params_ty_name} params, vec2 coords) {{")?;
+        writeln!(self.out, "    vec2 plane0_size = vec2(textureSize(plane0, 0));")?;
         writeln!(self.out, "    coords = (params.sample_transform * vec3(coords, 1.0));")?;
         writeln!(self.out, "    vec2 bounds_min = (params.sample_transform * vec3(0.0, 0.0, 1.0));")?;
         writeln!(self.out, "    vec2 bounds_max = (params.sample_transform * vec3(1.0, 1.0, 1.0));")?;
         writeln!(self.out, "    vec4 bounds = vec4(min(bounds_min, bounds_max), max(bounds_min, bounds_max));")?;
-        writeln!(self.out, "    vec2 size = vec2(textureSize(tex, 0));")?;
-        writeln!(self.out, "    vec2 half_texel = vec2(0.5) / size;")?;
-        writeln!(self.out, "    vec2 clamped = clamp(coords, bounds.xy + half_texel, bounds.zw - half_texel);")?;
-        writeln!(self.out, "    vec4 srcColor = texture(tex, clamped);")?;
-        writeln!(self.out, "    vec3 srcGammaRgb = srcColor.rgb;")?;
-        writeln!(self.out, "    vec3 srcLinearRgb = mix(")?;
-        writeln!(self.out, "        pow((srcGammaRgb + params.src_tf.a - 1.0) / params.src_tf.a, vec3(params.src_tf.g)),")?;
-        writeln!(self.out, "        srcGammaRgb / params.src_tf.k,")?;
-        writeln!(self.out, "        lessThan(srcGammaRgb, vec3(params.src_tf.k * params.src_tf.b)));")?;
-        writeln!(self.out, "    vec3 dstLinearRgb = params.gamut_conversion_matrix * srcLinearRgb;")?;
-        writeln!(self.out, "    vec3 dstGammaRgb = mix(")?;
-        writeln!(self.out, "        params.dst_tf.a * pow(dstLinearRgb, vec3(1.0 / params.dst_tf.g)) - (params.dst_tf.a - 1.0),")?;
-        writeln!(self.out, "        params.dst_tf.k * dstLinearRgb,")?;
-        writeln!(self.out, "        lessThan(dstLinearRgb, vec3(params.dst_tf.b)));")?;
-        writeln!(self.out, "    return vec4(dstGammaRgb, srcColor.a);")?;
+        writeln!(self.out, "    vec2 plane0_half_texel = vec2(0.5) / plane0_size;")?;
+        writeln!(self.out, "    vec2 plane0_coords = clamp(coords, bounds.xy + plane0_half_texel, bounds.zw - plane0_half_texel);")?;
+        writeln!(self.out, "    if (params.num_planes == 1u) {{")?;
+        writeln!(self.out, "        return textureLod(plane0, plane0_coords, 0.0);")?;
+        writeln!(self.out, "    }} else {{")?;
+        writeln!(self.out, "        vec2 plane1_size = vec2(textureSize(plane1, 0));")?;
+        writeln!(self.out, "        vec2 plane1_half_texel = vec2(0.5) / plane1_size;")?;
+        writeln!(self.out, "        vec2 plane1_coords = clamp(coords, bounds.xy + plane1_half_texel, bounds.zw - plane1_half_texel);")?;
+        writeln!(self.out, "        float y = textureLod(plane0, plane0_coords, 0.0).r;")?;
+        writeln!(self.out, "        vec2 uv = vec2(0.0, 0.0);")?;
+        writeln!(self.out, "        if (params.num_planes == 2u) {{")?;
+        writeln!(self.out, "            uv = textureLod(plane1, plane1_coords, 0.0).xy;")?;
+        writeln!(self.out, "        }} else {{")?;
+        writeln!(self.out, "            vec2 plane2_size = vec2(textureSize(plane2, 0));")?;
+        writeln!(self.out, "            vec2 plane2_half_texel = vec2(0.5) / plane2_size;")?;
+        writeln!(self.out, "            vec2 plane2_coords = clamp(coords, bounds.xy + plane2_half_texel, bounds.zw - plane2_half_texel);")?;
+        writeln!(self.out, "            uv.x = textureLod(plane1, plane1_coords, 0.0).x;")?;
+        writeln!(self.out, "            uv.y = textureLod(plane2, plane2_coords, 0.0).x;")?;
+        writeln!(self.out, "        }}")?;
+        self.write_external_texture_convert_yuv_to_rgb()?;
+        writeln!(self.out, "    }}")?;
         writeln!(self.out, "}}")?;
 
-        // External load
+        // External load (textureLoad).
         writeln!(self.out)?;
-        writeln!(self.out, "vec4 {IMAGE_LOAD_EXTERNAL_FUNCTION}(highp samplerExternalOES tex, {params_ty_name} params, ivec2 coords) {{")?;
-        writeln!(self.out, "    uvec2 tex_size = uvec2(textureSize(tex, 0));")?;
-        writeln!(self.out, "    uvec2 cropped_size = (params.size != uvec2(0u)) ? params.size : tex_size;")?;
+        writeln!(self.out, "vec4 {IMAGE_LOAD_EXTERNAL_FUNCTION}({precision}sampler2D plane0, {precision}sampler2D plane1, {precision}sampler2D plane2, {params_ty_name} params, ivec2 coords) {{")?;
+        writeln!(self.out, "    uvec2 plane0_size = uvec2(textureSize(plane0, 0));")?;
+        writeln!(self.out, "    uvec2 cropped_size = (params.size != uvec2(0u)) ? params.size : plane0_size;")?;
         writeln!(self.out, "    coords = min(coords, ivec2(cropped_size - uvec2(1u)));")?;
-        writeln!(self.out, "    ivec2 transformed = ivec2(round(params.load_transform * vec3(vec2(coords), 1.0)));")?;
-        writeln!(self.out, "    vec4 srcColor = texelFetch(tex, transformed, 0);")?;
-        writeln!(self.out, "    vec3 srcGammaRgb = srcColor.rgb;")?;
-        writeln!(self.out, "    vec3 srcLinearRgb = mix(")?;
-        writeln!(self.out, "        pow((srcGammaRgb + params.src_tf.a - 1.0) / params.src_tf.a, vec3(params.src_tf.g)),")?;
-        writeln!(self.out, "        srcGammaRgb / params.src_tf.k,")?;
-        writeln!(self.out, "        lessThan(srcGammaRgb, vec3(params.src_tf.k * params.src_tf.b)));")?;
-        writeln!(self.out, "    vec3 dstLinearRgb = params.gamut_conversion_matrix * srcLinearRgb;")?;
-        writeln!(self.out, "    vec3 dstGammaRgb = mix(")?;
-        writeln!(self.out, "        params.dst_tf.a * pow(dstLinearRgb, vec3(1.0 / params.dst_tf.g)) - (params.dst_tf.a - 1.0),")?;
-        writeln!(self.out, "        params.dst_tf.k * dstLinearRgb,")?;
-        writeln!(self.out, "        lessThan(dstLinearRgb, vec3(params.dst_tf.b)));")?;
-        writeln!(self.out, "    return vec4(dstGammaRgb, srcColor.a);")?;
+        writeln!(self.out, "    ivec2 plane0_coords = ivec2(round(params.load_transform * vec3(vec2(coords), 1.0)));")?;
+        writeln!(self.out, "    if (params.num_planes == 1u) {{")?;
+        writeln!(self.out, "        return texelFetch(plane0, plane0_coords, 0);")?;
+        writeln!(self.out, "    }} else {{")?;
+        writeln!(self.out, "        uvec2 plane1_size = uvec2(textureSize(plane1, 0));")?;
+        writeln!(self.out, "        ivec2 plane1_coords = ivec2(floor(vec2(plane0_coords) * vec2(plane1_size) / vec2(plane0_size)));")?;
+        writeln!(self.out, "        float y = texelFetch(plane0, plane0_coords, 0).x;")?;
+        writeln!(self.out, "        vec2 uv = vec2(0.0, 0.0);")?;
+        writeln!(self.out, "        if (params.num_planes == 2u) {{")?;
+        writeln!(self.out, "            uv = texelFetch(plane1, plane1_coords, 0).xy;")?;
+        writeln!(self.out, "        }} else {{")?;
+        writeln!(self.out, "            uvec2 plane2_size = uvec2(textureSize(plane2, 0));")?;
+        writeln!(self.out, "            ivec2 plane2_coords = ivec2(floor(vec2(plane0_coords) * vec2(plane2_size) / vec2(plane0_size)));")?;
+        writeln!(self.out, "            uv.x = texelFetch(plane1, plane1_coords, 0).x;")?;
+        writeln!(self.out, "            uv.y = texelFetch(plane2, plane2_coords, 0).x;")?;
+        writeln!(self.out, "        }}")?;
+        self.write_external_texture_convert_yuv_to_rgb()?;
+        writeln!(self.out, "    }}")?;
         writeln!(self.out, "}}")?;
 
-        // External dimension
+        // External dimension (textureDimensions).
         writeln!(self.out)?;
-        writeln!(self.out, "uvec2 {IMAGE_SIZE_EXTERNAL_FUNCTION}(highp samplerExternalOES tex, {params_ty_name} params) {{")?;
-        writeln!(self.out, "    uvec2 s = params.size;")?;
-        writeln!(self.out, "    return (s != uvec2(0u)) ? s : uvec2(textureSize(tex, 0));")?;
+        writeln!(self.out, "uvec2 {IMAGE_SIZE_EXTERNAL_FUNCTION}({precision}sampler2D plane0, {precision}sampler2D plane1, {precision}sampler2D plane2, {params_ty_name} params) {{")?;
+        writeln!(self.out, "    return (params.size != uvec2(0u)) ? params.size : uvec2(textureSize(plane0, 0));")?;
         writeln!(self.out, "}}")?;
 
         Ok(())
     }
 
-    fn write_external_texture_params(
+    /// Writes the shared YUV-to-RGB conversion code used by the external
+    /// texture sample and load helpers. Expects `y` (`float`), `uv` (`vec2`)
+    /// and `params` to be in scope, and emits the `return` statement. The
+    /// emitted code is indented to live inside the multi-plane `else` block.
+    ///
+    /// Mirrors `msl::Writer::write_convert_yuv_to_rgb_and_return`.
+    #[rustfmt::skip]
+    fn write_external_texture_convert_yuv_to_rgb(&mut self) -> BackendResult {
+        writeln!(self.out, "        vec3 srcGammaRgb = (params.yuv_conversion_matrix * vec4(y, uv, 1.0)).rgb;")?;
+        writeln!(self.out, "        vec3 srcLinearRgb = mix(")?;
+        writeln!(self.out, "            pow((srcGammaRgb + params.src_tf.a - 1.0) / params.src_tf.a, vec3(params.src_tf.g)),")?;
+        writeln!(self.out, "            srcGammaRgb / params.src_tf.k,")?;
+        writeln!(self.out, "            lessThan(srcGammaRgb, vec3(params.src_tf.k * params.src_tf.b)));")?;
+        writeln!(self.out, "        vec3 dstLinearRgb = params.gamut_conversion_matrix * srcLinearRgb;")?;
+        writeln!(self.out, "        vec3 dstGammaRgb = mix(")?;
+        writeln!(self.out, "            params.dst_tf.a * pow(dstLinearRgb, vec3(1.0 / params.dst_tf.g)) - (params.dst_tf.a - 1.0),")?;
+        writeln!(self.out, "            params.dst_tf.k * dstLinearRgb,")?;
+        writeln!(self.out, "            lessThan(dstLinearRgb, vec3(params.dst_tf.b)));")?;
+        writeln!(self.out, "        return vec4(dstGammaRgb, 1.0);")?;
+        Ok(())
+    }
+
+    /// Writes the lowered argument list for an external texture used as the
+    /// `image` of an external-texture operation: `plane0, plane1, plane2,
+    /// params`. The external texture is resolved to either a global variable
+    /// or a function argument, mirroring the other backends.
+    fn write_external_texture_args(
         &mut self,
         image: Handle<crate::Expression>,
         ctx: &back::FunctionCtx,
     ) -> BackendResult {
         match ctx.expressions[image] {
             crate::Expression::GlobalVariable(handle) => {
-                let global = &self.module.global_variables[handle];
-                let name = self.get_global_name(handle, global);
-                write!(self.out, "{name}_params._member")?;
+                for i in 0..3 {
+                    let name = &self.names[&NameKey::ExternalTextureGlobalVariable(
+                        handle,
+                        proc::ExternalTextureNameKey::Plane(i),
+                    )];
+                    write!(self.out, "{name}, ")?;
+                }
+                let params = &self.names[&NameKey::ExternalTextureGlobalVariable(
+                    handle,
+                    proc::ExternalTextureNameKey::Params,
+                )];
+                write!(self.out, "{params}._member")?;
             }
             crate::Expression::FunctionArgument(index) => {
-                let name = self.names[&ctx.argument_key(index)].clone();
-                write!(self.out, "{name}_params")?;
+                for i in 0..3 {
+                    let name = &self.names[&ctx
+                        .external_texture_argument_key(index, proc::ExternalTextureNameKey::Plane(i))];
+                    write!(self.out, "{name}, ")?;
+                }
+                let params = &self.names
+                    [&ctx.external_texture_argument_key(index, proc::ExternalTextureNameKey::Params)];
+                write!(self.out, "{params}")?;
             }
             _ => unreachable!("External texture must be a global variable or function argument"),
         }
@@ -2205,16 +2337,17 @@ impl<'a, W: Write> Writer<'a, W> {
                     })
                     .collect();
                 self.write_slice(&arguments, |this, _, &(orig_idx, arg)| {
-                    this.write_expr(arg, ctx)?;
-                    // For external texture arguments, also pass the params
+                    // External texture arguments expand to three plane
+                    // samplers plus the params struct.
                     let arg_ty = this.module.functions[function].arguments[orig_idx].ty;
                     if let TypeInner::Image {
                         class: crate::ImageClass::External,
                         ..
                     } = this.module.types[arg_ty].inner
                     {
-                        write!(this.out, ", ")?;
-                        this.write_external_texture_params(arg, ctx)?;
+                        this.write_external_texture_args(arg, ctx)?;
+                    } else {
+                        this.write_expr(arg, ctx)?;
                     }
                     Ok(())
                 })?;
@@ -2711,9 +2844,7 @@ impl<'a, W: Write> Writer<'a, W> {
 
                 if class == crate::ImageClass::External {
                     write!(self.out, "{SAMPLE_EXTERNAL_TEXTURE_FUNCTION}(")?;
-                    self.write_expr(image, ctx)?;
-                    write!(self.out, ", ")?;
-                    self.write_external_texture_params(image, ctx)?;
+                    self.write_external_texture_args(image, ctx)?;
                     write!(self.out, ", ")?;
                     self.write_expr(coordinate, ctx)?;
                     write!(self.out, ")")?;
@@ -2957,9 +3088,7 @@ impl<'a, W: Write> Writer<'a, W> {
                             }
                             ImageClass::External => {
                                 write!(self.out, "{IMAGE_SIZE_EXTERNAL_FUNCTION}(")?;
-                                self.write_expr(image, ctx)?;
-                                write!(self.out, ", ")?;
-                                self.write_external_texture_params(image, ctx)?;
+                                self.write_external_texture_args(image, ctx)?;
                             }
                         }
                         write!(self.out, ")")?;
@@ -4257,9 +4386,7 @@ impl<'a, W: Write> Writer<'a, W> {
         // For external textures, use the dedicated load helper
         if class == crate::ImageClass::External {
             write!(self.out, "{IMAGE_LOAD_EXTERNAL_FUNCTION}(")?;
-            self.write_expr(image, ctx)?;
-            write!(self.out, ", ")?;
-            self.write_external_texture_params(image, ctx)?;
+            self.write_external_texture_args(image, ctx)?;
             write!(self.out, ", ")?;
             // Coordinates need to be ivec2; the WGSL coord may be vec2<i32> or vec2<u32>
             write!(self.out, "ivec2(")?;

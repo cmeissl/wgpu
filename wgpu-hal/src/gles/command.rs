@@ -806,24 +806,12 @@ impl crate::CommandEncoder for super::CommandEncoder {
                     });
                 }
                 super::RawBinding::ExternalTexture {
-                    raw,
-                    target,
+                    planes,
                     params_raw,
                     params_offset,
                     params_size,
                 } => {
-                    // Bind the texture to its texture unit slot
-                    dirty_textures |= 1 << slot;
-                    self.state.texture_slots[slot as usize].tex_target = target;
-                    self.cmd_buffer.commands.push(C::BindTexture {
-                        slot,
-                        texture: raw,
-                        target,
-                        aspects: crate::FormatAspects::COLOR,
-                        mip_levels: 0..1,
-                    });
-                    // Bind the params SSBO to its shader storage buffer binding point
-                    let params_slot = layout
+                    let ext_target = layout
                         .naga_options
                         .binding_map
                         .get(&naga::ResourceBinding {
@@ -831,11 +819,24 @@ impl crate::CommandEncoder for super::CommandEncoder {
                             binding: binding_layout.binding,
                         })
                         .and_then(|t| t.external_texture.as_ref())
-                        .map(|t| t.params as u32)
                         .unwrap();
+
+                    for (i, &tex) in planes.iter().enumerate() {
+                        let plane_slot = ext_target.planes[i] as u32;
+                        dirty_textures |= 1 << plane_slot;
+                        self.state.texture_slots[plane_slot as usize].tex_target = glow::TEXTURE_2D;
+                        self.cmd_buffer.commands.push(C::BindTexture {
+                            slot: plane_slot,
+                            texture: tex,
+                            target: glow::TEXTURE_2D,
+                            aspects: crate::FormatAspects::COLOR,
+                            mip_levels: 0..1,
+                        });
+                    }
+
                     self.cmd_buffer.commands.push(C::BindBuffer {
                         target: glow::SHADER_STORAGE_BUFFER,
-                        slot: params_slot,
+                        slot: ext_target.params as u32,
                         buffer: params_raw,
                         offset: params_offset,
                         size: params_size,

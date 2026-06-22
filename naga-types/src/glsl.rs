@@ -148,15 +148,16 @@ impl fmt::Display for Version {
 
 /// Binding targets for a single external texture.
 ///
-/// Holds both the texture unit for the `samplerExternalOES` and the uniform
-/// buffer binding point for the `NagaExternalTextureParams` UBO.
+/// External textures are lowered to up to three plane textures (`sampler2D`)
+/// plus a `NagaExternalTextureParams` buffer. Unused planes still occupy a
+/// slot; the shader selects valid planes at runtime via `params.num_planes`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "serialize", derive(serde::Serialize))]
 #[cfg_attr(feature = "deserialize", derive(serde::Deserialize))]
 pub struct ExternalTextureBindTarget {
-    /// The texture unit to bind the `samplerExternalOES` to.
-    pub texture: u8,
-    /// The uniform buffer binding point for `NagaExternalTextureParams`.
+    /// Texture units for the (up to 3) plane samplers, in plane order.
+    pub planes: [u8; 3],
+    /// The buffer binding point for `NagaExternalTextureParams`.
     pub params: u8,
 }
 
@@ -167,7 +168,7 @@ pub struct ExternalTextureBindTarget {
 pub struct BindTarget {
     /// Binding slot for regular resources (textures, buffers, storage images, samplers).
     pub binding: Option<u8>,
-    /// Binding targets for external textures (`samplerExternalOES` + `NagaExternalTextureParams` UBO).
+    /// Binding targets for external textures (plane `sampler2D`s + `NagaExternalTextureParams` buffer).
     pub external_texture: Option<ExternalTextureBindTarget>,
 }
 

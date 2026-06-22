@@ -49,6 +49,6 @@ version.Embedded = { is_webgl = false, version = 310 }
 writer_flags = ""
 zero_initialize_workgroup_memory = true
 binding_map = [
-    { resource_binding = { group = 0, binding = 0 }, bind_target = { binding = 0, external_texture = { texture = 0, params = 0 } } },
+    { resource_binding = { group = 0, binding = 0 }, bind_target = { binding = 0, external_texture = { planes = [0, 1, 2], params = 0 } } },
     { resource_binding = { group = 0, binding = 1 }, bind_target = { binding = 1 } },
 ]

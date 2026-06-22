@@ -624,8 +624,7 @@ enum RawBinding {
     Image(ImageBinding),
     Sampler(glow::Sampler),
     ExternalTexture {
-        raw: glow::Texture,
-        target: BindTarget,
+        planes: [glow::Texture; 3],
         params_raw: glow::Buffer,
         params_offset: i32,
         params_size: i32,

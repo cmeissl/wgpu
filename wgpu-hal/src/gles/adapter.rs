@@ -529,8 +529,9 @@ impl super::Adapter {
         );
         features.set(
             wgt::Features::EXTERNAL_TEXTURE,
-            es_ver.is_some_and(|v| v >= (3, 0))
-                && extensions.contains("GL_OES_EGL_image_external_essl3"),
+            // ES 3.1 (std430 SSBO) + dmabuf-plane import extension, or desktop GL 4.3+ (std430 SSBO floor).
+            (es_ver.is_some_and(|v| v >= (3, 1)) && extensions.contains("GL_OES_EGL_image"))
+                || full_ver.is_some_and(|v| v >= (4, 3)),
         );
         if extensions.contains("GL_ARB_timer_query") {
             features.set(wgt::Features::TIMESTAMP_QUERY, true);
