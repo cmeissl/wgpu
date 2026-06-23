@@ -1566,16 +1566,7 @@ impl<'a, W: Write> Writer<'a, W> {
         writeln!(self.out, "    vec2 clamped = clamp(coords, bounds.xy + half_texel, bounds.zw - half_texel);")?;
         writeln!(self.out, "    vec4 srcColor = texture(tex, clamped);")?;
         writeln!(self.out, "    vec3 srcGammaRgb = srcColor.rgb;")?;
-        writeln!(self.out, "    vec3 srcLinearRgb = mix(")?;
-        writeln!(self.out, "        pow((srcGammaRgb + params.src_tf.a - 1.0) / params.src_tf.a, vec3(params.src_tf.g)),")?;
-        writeln!(self.out, "        srcGammaRgb / params.src_tf.k,")?;
-        writeln!(self.out, "        lessThan(srcGammaRgb, vec3(params.src_tf.k * params.src_tf.b)));")?;
-        writeln!(self.out, "    vec3 dstLinearRgb = params.gamut_conversion_matrix * srcLinearRgb;")?;
-        writeln!(self.out, "    vec3 dstGammaRgb = mix(")?;
-        writeln!(self.out, "        params.dst_tf.a * pow(dstLinearRgb, vec3(1.0 / params.dst_tf.g)) - (params.dst_tf.a - 1.0),")?;
-        writeln!(self.out, "        params.dst_tf.k * dstLinearRgb,")?;
-        writeln!(self.out, "        lessThan(dstLinearRgb, vec3(params.dst_tf.b)));")?;
-        writeln!(self.out, "    return vec4(dstGammaRgb, srcColor.a);")?;
+        writeln!(self.out, "    return vec4(srcGammaRgb, srcColor.a);")?;
         writeln!(self.out, "}}")?;
 
         // External load
@@ -1587,16 +1578,7 @@ impl<'a, W: Write> Writer<'a, W> {
         writeln!(self.out, "    ivec2 transformed = ivec2(round(params.load_transform * vec3(vec2(coords), 1.0)));")?;
         writeln!(self.out, "    vec4 srcColor = texelFetch(tex, transformed, 0);")?;
         writeln!(self.out, "    vec3 srcGammaRgb = srcColor.rgb;")?;
-        writeln!(self.out, "    vec3 srcLinearRgb = mix(")?;
-        writeln!(self.out, "        pow((srcGammaRgb + params.src_tf.a - 1.0) / params.src_tf.a, vec3(params.src_tf.g)),")?;
-        writeln!(self.out, "        srcGammaRgb / params.src_tf.k,")?;
-        writeln!(self.out, "        lessThan(srcGammaRgb, vec3(params.src_tf.k * params.src_tf.b)));")?;
-        writeln!(self.out, "    vec3 dstLinearRgb = params.gamut_conversion_matrix * srcLinearRgb;")?;
-        writeln!(self.out, "    vec3 dstGammaRgb = mix(")?;
-        writeln!(self.out, "        params.dst_tf.a * pow(dstLinearRgb, vec3(1.0 / params.dst_tf.g)) - (params.dst_tf.a - 1.0),")?;
-        writeln!(self.out, "        params.dst_tf.k * dstLinearRgb,")?;
-        writeln!(self.out, "        lessThan(dstLinearRgb, vec3(params.dst_tf.b)));")?;
-        writeln!(self.out, "    return vec4(dstGammaRgb, srcColor.a);")?;
+        writeln!(self.out, "    return vec4(srcGammaRgb, srcColor.a);")?;
         writeln!(self.out, "}}")?;
 
         // External dimension
