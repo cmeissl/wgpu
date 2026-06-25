@@ -1566,7 +1566,7 @@ impl<'a, W: Write> Writer<'a, W> {
         writeln!(self.out, "    vec2 clamped = clamp(coords, bounds.xy + half_texel, bounds.zw - half_texel);")?;
         writeln!(self.out, "    vec4 srcColor = texture(tex, clamped);")?;
         writeln!(self.out, "    vec3 srcGammaRgb = srcColor.rgb;")?;
-        writeln!(self.out, "    return vec4(srcGammaRgb, srcColor.a);")?;
+        writeln!(self.out, "    return vec4(srcGammaRgb, 1.0);")?;
         writeln!(self.out, "}}")?;
 
         // External load
@@ -1578,7 +1578,7 @@ impl<'a, W: Write> Writer<'a, W> {
         writeln!(self.out, "    ivec2 transformed = ivec2(round(params.load_transform * vec3(vec2(coords), 1.0)));")?;
         writeln!(self.out, "    vec4 srcColor = texelFetch(tex, transformed, 0);")?;
         writeln!(self.out, "    vec3 srcGammaRgb = srcColor.rgb;")?;
-        writeln!(self.out, "    return vec4(srcGammaRgb, srcColor.a);")?;
+        writeln!(self.out, "    return vec4(srcGammaRgb, 1.0);")?;
         writeln!(self.out, "}}")?;
 
         // External dimension
