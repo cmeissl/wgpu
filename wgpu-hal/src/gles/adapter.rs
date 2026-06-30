@@ -532,7 +532,12 @@ impl super::Adapter {
             es_ver.is_some_and(|v| v >= (3, 0))
                 && extensions.contains("GL_OES_EGL_image_external_essl3"),
         );
-        if extensions.contains("GL_ARB_timer_query") {
+        // GL_ARB_timer_query is the desktop-GL name; GL_EXT_disjoint_timer_query
+        // is the equivalent on OpenGL ES contexts (exposed by Mesa, Panfrost, and
+        // others). Accept either so timestamp queries work on GLES too.
+        if extensions.contains("GL_ARB_timer_query")
+            || extensions.contains("GL_EXT_disjoint_timer_query")
+        {
             features.set(wgt::Features::TIMESTAMP_QUERY, true);
             features.set(wgt::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS, true);
             features.set(wgt::Features::TIMESTAMP_QUERY_INSIDE_PASSES, true);
