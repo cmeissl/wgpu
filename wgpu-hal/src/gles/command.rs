@@ -38,7 +38,10 @@ pub(super) struct State {
     immediates_descs: ArrayVec<super::ImmediateDesc, { super::MAX_IMMEDIATES_COMMANDS }>,
     // The current state of the immediate data block.
     current_immediates_data: [u32; super::MAX_IMMEDIATES],
-    end_of_pass_timestamp: Option<glow::Query>,
+    /// Target (e.g. GL_TIME_ELAPSED) of an active begin/end timer query that must
+    /// be closed at pass end. `Some(target)` iff a begin query was emitted for the
+    /// current pass via `timestamp_writes`.
+    end_of_pass_timestamp: Option<super::BindTarget>,
     clip_distance_count: u32,
 }
 
@@ -501,12 +504,17 @@ impl crate::CommandEncoder for super::CommandEncoder {
     ) -> Result<(), crate::DeviceError> {
         debug_assert!(self.state.end_of_pass_timestamp.is_none());
         if let Some(ref t) = desc.timestamp_writes {
+            // GL_TIME_ELAPSED is a begin/end span: start the timer on the
+            // beginning-of-pass query object; the elapsed result lands there.
+            // The end-of-pass write index is unused (the duration is a single
+            // value read from the begin slot).
             if let Some(index) = t.beginning_of_pass_write_index {
-                unsafe { self.write_timestamp(t.query_set, index) }
+                let query = t.query_set.queries[index as usize];
+                self.cmd_buffer
+                    .commands
+                    .push(C::BeginQuery(query, t.query_set.target));
+                self.state.end_of_pass_timestamp = Some(t.query_set.target);
             }
-            self.state.end_of_pass_timestamp = t
-                .end_of_pass_write_index
-                .map(|index| t.query_set.queries[index as usize]);
         }
 
         self.state.render_size = desc.extent;
@@ -726,8 +734,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
         self.state.vertex_attributes.clear();
         self.state.primitive = super::PrimitiveState::default();
 
-        if let Some(query) = self.state.end_of_pass_timestamp.take() {
-            self.cmd_buffer.commands.push(C::TimestampQuery(query));
+        if let Some(target) = self.state.end_of_pass_timestamp.take() {
+            self.cmd_buffer.commands.push(C::EndQuery(target));
         }
     }
 
@@ -1259,12 +1267,17 @@ impl crate::CommandEncoder for super::CommandEncoder {
     unsafe fn begin_compute_pass(&mut self, desc: &crate::ComputePassDescriptor<super::QuerySet>) {
         debug_assert!(self.state.end_of_pass_timestamp.is_none());
         if let Some(ref t) = desc.timestamp_writes {
+            // GL_TIME_ELAPSED is a begin/end span: start the timer on the
+            // beginning-of-pass query object; the elapsed result lands there.
+            // The end-of-pass write index is unused (the duration is a single
+            // value read from the begin slot).
             if let Some(index) = t.beginning_of_pass_write_index {
-                unsafe { self.write_timestamp(t.query_set, index) }
+                let query = t.query_set.queries[index as usize];
+                self.cmd_buffer
+                    .commands
+                    .push(C::BeginQuery(query, t.query_set.target));
+                self.state.end_of_pass_timestamp = Some(t.query_set.target);
             }
-            self.state.end_of_pass_timestamp = t
-                .end_of_pass_write_index
-                .map(|index| t.query_set.queries[index as usize]);
         }
 
         if let Some(label) = desc.label {
@@ -1279,8 +1292,8 @@ impl crate::CommandEncoder for super::CommandEncoder {
             self.state.has_pass_label = false;
         }
 
-        if let Some(query) = self.state.end_of_pass_timestamp.take() {
-            self.cmd_buffer.commands.push(C::TimestampQuery(query));
+        if let Some(target) = self.state.end_of_pass_timestamp.take() {
+            self.cmd_buffer.commands.push(C::EndQuery(target));
         }
     }
 

@@ -1728,7 +1728,11 @@ impl crate::Device for super::Device {
             queries: queries.into_boxed_slice(),
             target: match desc.ty {
                 wgt::QueryType::Occlusion => glow::ANY_SAMPLES_PASSED_CONSERVATIVE,
-                wgt::QueryType::Timestamp => glow::TIMESTAMP,
+                // GLES exposes timer queries via GL_EXT_disjoint_timer_query, where
+                // glQueryCounter(GL_TIMESTAMP) is optional and unsupported on tilers
+                // like Panfrost. GL_TIME_ELAPSED (a begin/end span) is the guaranteed
+                // path, so use it for Timestamp query sets on this backend.
+                wgt::QueryType::Timestamp => glow::TIME_ELAPSED,
                 _ => unimplemented!(),
             },
         })
